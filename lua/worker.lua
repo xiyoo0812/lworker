@@ -45,11 +45,6 @@ function quanta.init()
     import("kernel/protobuf_mgr.lua")
 end
 
-function quanta.hook_coroutine(hooker)
-    co_hookor = hooker
-    quanta.co_hookor = hooker
-end
-
 --启动
 function quanta.startup(entry)
     quanta.now = 0
