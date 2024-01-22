@@ -5,19 +5,21 @@
 #include "worker.h"
 
 using namespace std::chrono;
+using vstring   = std::string_view;
 
 namespace lworker {
 
     class scheduler : public ischeduler
     {
     public:
-        void setup(lua_State* L, std::string& service, std::string& sandbox) {
+        void setup(lua_State* L, vstring service, vstring sandbox) {
             m_service = service;
             m_sandbox = sandbox;
             m_lua = std::make_shared<kit_state>(L);
+            m_codec = m_lua->create_codec();
         }
 
-        std::shared_ptr<worker> find_worker(std::string& name) {
+        std::shared_ptr<worker> find_worker(vstring name) {
             std::unique_lock<spin_mutex> lock(m_mutex);
             auto it = m_worker_map.find(name);
             if (it != m_worker_map.end()){
@@ -26,11 +28,11 @@ namespace lworker {
             return nullptr;
         }
 
-        bool startup(std::string& name, std::string& entry) {
+        bool startup(vstring name, vstring entry, vstring incl) {
             std::unique_lock<spin_mutex> lock(m_mutex);
             auto it = m_worker_map.find(name);
             if (it == m_worker_map.end()){
-                auto workor = std::make_shared<worker>(this, name, entry, m_service, m_sandbox);
+                auto workor = std::make_shared<worker>(this, name, entry, incl, m_service, m_sandbox);
                 m_worker_map.insert(std::make_pair(name, workor));
                 workor->startup();
                 return true;
@@ -38,28 +40,42 @@ namespace lworker {
             return false;
         }
 
-        bool call(std::string& name, slice* buf) {
+        int broadcast(lua_State* L) {
+            std::unique_lock<spin_mutex> lock(m_mutex);
+            for (auto it : m_worker_map) {
+                it.second->call(L);
+            }
+            return 0;
+        }
+
+        int call(lua_State* L, vstring name) {
             if (name == "master") {
-                return call(buf);
+                lua_pushboolean(L, call(L));
+                return 1;
             }
             auto workor = find_worker(name);
             if (workor) {
-                return workor->call(buf);
+                lua_pushboolean(L, workor->call(L));
+                return 1;
             }
-            return false;
+            lua_pushboolean(L, false);
+            return 1;
         }
 
-        bool call(slice* buf) {
-            if (buf->size() < UINT32_MAX) {
-                std::unique_lock<spin_mutex> lock(m_mutex);
-                m_write_buf->write<uint32_t>(buf->size());
-                m_write_buf->push_data(buf->head(), buf->size());
+        bool call(lua_State* L) {
+            size_t data_len;
+            std::unique_lock<spin_mutex> lock(m_mutex);
+            uint8_t* data = m_codec->encode(L, 2, &data_len);
+            uint8_t* target = m_write_buf->peek_space(data_len + sizeof(uint32_t));
+            if (target) {
+                m_write_buf->write<uint32_t>(data_len);
+                m_write_buf->push_data(data, data_len);
                 return true;
             }
             return false;
         }
 
-        void update() {
+        void update(uint64_t clock_ms) {
             if (m_read_buf->empty()) {
                 if (m_write_buf->empty()) {
                     return;
@@ -71,13 +87,19 @@ namespace lworker {
             const char* service = m_service.c_str();
             slice* slice = read_slice(m_read_buf, &plen);
             while (slice) {
-                m_lua->table_call(service, "on_scheduler", nullptr, std::tie(), slice);
+                m_codec->set_slice(slice);
+                m_lua->table_call(service, "on_scheduler", nullptr, m_codec, std::tie());
+                if (m_codec->failed()){
+                    m_read_buf->clean();
+                    break;
+                }
                 m_read_buf->pop_size(plen);
+                if (ltimer::steady_ms() - clock_ms > 100) break;
                 slice = read_slice(m_read_buf, &plen);
             }
         }
 
-        void destory(std::string& name, std::shared_ptr<worker> workor) {
+        void destory(vstring name) {
             std::unique_lock<spin_mutex> lock(m_mutex);
             auto it = m_worker_map.find(name);
             if (it != m_worker_map.end()) {
@@ -90,16 +112,17 @@ namespace lworker {
             for (auto it : m_worker_map) {
                 it.second->stop();
             }
+            m_worker_map.clear();
         }
 
     private:
         spin_mutex m_mutex;
+        codec_base* m_codec = nullptr;
         std::string m_service, m_sandbox;
         std::shared_ptr<kit_state> m_lua = nullptr;
-        std::map<std::string, std::shared_ptr<worker>> m_worker_map;
-        std::shared_ptr<var_buffer> m_slice = std::make_shared<var_buffer>();
-        std::shared_ptr<var_buffer> m_read_buf = std::make_shared<var_buffer>();
-        std::shared_ptr<var_buffer> m_write_buf = std::make_shared<var_buffer>();
+        std::shared_ptr<luabuf> m_read_buf = std::make_shared<luabuf>();
+        std::shared_ptr<luabuf> m_write_buf = std::make_shared<luabuf>();
+        std::map<std::string, std::shared_ptr<worker>, std::less<>> m_worker_map;
     };
 }
 
