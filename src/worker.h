@@ -35,7 +35,6 @@ namespace lworker {
     class worker;
     class ischeduler {
     public:
-        virtual void destory(vstring name) = 0;
         virtual int broadcast(lua_State* L) = 0;
         virtual int call(lua_State* L, vstring name, uint8_t* data, size_t data_len) = 0;
     };
@@ -123,7 +122,6 @@ namespace lworker {
                     m_lua->set_path(it->first.c_str(), it->second.c_str());
                 }
             }
-            set_env("QUANTA_SANDBOX", "sandbox", 1);
             std::thread(&worker::run, this).swap(m_thread);
         }
 
@@ -145,15 +143,16 @@ namespace lworker {
                 return m_schedulor->call(L, name, data, data_len);
             });
             auto ehandler = [&](vstring err) {
+                m_running = false;
                 printf("worker load failed, because: %s\n", err.data());
-                m_schedulor->destory(m_name);
             };
             auto sandbox = get_env("QUANTA_SANDBOX");
-            if (!m_lua->run_script(fmt::format("require '{}'", sandbox), ehandler)) return;
+            if (sandbox) {
+                if (!m_lua->run_script(fmt::format("require '{}'", sandbox), ehandler)) return;
+            }
             auto entry = get_env("QUANTA_ENTRY");
             if (!m_lua->run_script(fmt::format("require '{}'", entry), ehandler)) return;
 
-            m_running = true;
             const char* ns = m_namespace.c_str();
             while (m_running) {
                 if (m_stop) {
@@ -161,9 +160,6 @@ namespace lworker {
                     m_running = false;
                 }
                 m_lua->table_call(ns, "run");
-            }
-            if (!m_stop){
-                m_schedulor->destory(m_name);
             }
         }
 
@@ -174,11 +170,15 @@ namespace lworker {
             }
         }
 
+        bool running() {
+            return m_running;
+        }
+
     private:
         spin_mutex m_mutex;
         std::thread m_thread;
         bool m_stop = false;
-        bool m_running = false;
+        bool m_running = true;
         environ_map m_environs = {};
         codec_base* m_codec = nullptr;
         ischeduler* m_schedulor = nullptr;
