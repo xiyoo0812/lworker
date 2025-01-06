@@ -77,6 +77,19 @@ namespace lworker {
             }
         }
 
+        void add_path(const char* field, const char* path) {
+            auto handle = m_environs.extract(field);
+            if (handle.empty()) {
+                m_environs[field] = path;
+                m_lua->set_path(field, path);
+                return;
+            }
+            auto& epath = handle.mapped();
+            epath.append(path);
+            m_environs.insert(std::move(handle));
+            m_lua->set_path(field, epath.c_str());
+        }
+
         bool call(lua_State* L, uint8_t* data, size_t data_len) {
             std::unique_lock<spin_mutex> lock(m_mutex);
             uint8_t* target = m_write_buf->peek_space(data_len + sizeof(uint32_t));
@@ -121,6 +134,7 @@ namespace lworker {
                 }
                 m_lua->set("platform", m_platform);
                 m_lua->set_function("set_env", [&](const char* key, const char* value) { set_env(key, value, 1); });
+                m_lua->set_function("add_path", [&](const char* field, const char* path) { add_path(field, path); });
                 m_lua->set_function("set_path", [&](const char* field, const char* path) { m_lua->set_path(field, path); });
                 m_lua->run_script(fmt::format("dofile('{}')", conf), [&](std::string_view err) {
                     printf("worker load conf %s failed, because: %s", conf.data(), err.data());
