@@ -90,7 +90,7 @@ namespace lworker {
             m_lua->set_path(field, epath.c_str());
         }
 
-        bool call(lua_State* L, uint8_t* data, size_t data_len) {
+        bool call(uint8_t* data, size_t data_len) {
             std::unique_lock<spin_mutex> lock(m_mutex);
             uint8_t* target = m_write_buf->peek_space(data_len + sizeof(uint32_t));
             if (target) {
@@ -169,6 +169,9 @@ namespace lworker {
                 size_t data_len;
                 uint8_t* data = m_codec.encode(L, 2, &data_len);
                 return m_schedulor->call(L, name, data, data_len);
+            });
+            quanta.set_function("broadcast", [&](lua_State* L) {
+                return m_schedulor->broadcast(L);
             });
             auto ehandler = [&](vstring err) {
                 m_running = false;
