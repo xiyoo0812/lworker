@@ -34,11 +34,11 @@ namespace lworker {
             return nullptr;
         }
 
-        bool startup(vstring name, environ_map& envs, vstring conf, kit_state* ks) {
+        bool startup(vstring name, environ_map& envs, vstring conf) {
             std::unique_lock<spin_mutex> lock(m_mutex);
             auto it = m_worker_map.find(name);
             if (it == m_worker_map.end()) {
-                auto workor = std::make_shared<worker>(this, ks, name, m_namespace, m_platform);
+                auto workor = std::make_shared<worker>(this, name, m_namespace, m_platform);
                 m_worker_map.insert(std::make_pair(name, workor));
                 workor->startup(m_environs, envs, conf);
                 return true;
