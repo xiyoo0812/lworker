@@ -3,7 +3,6 @@
 #include <thread>
 
 #include "lua_kit.h"
-#include "fmt/core.h"
 
 #ifdef WIN32
 #define getpid _getpid
@@ -15,7 +14,7 @@ using namespace luakit;
 
 using sstring = std::string;
 using vstring = std::string_view;
-using environ_map = std::map<sstring, sstring>;
+using environ_map = std::unordered_map<sstring, sstring>;
 
 namespace lworker {
 
@@ -65,13 +64,12 @@ namespace lworker {
         }
 
         const char* get_env(const char* key) {
-            auto it = m_environs.find(key);
-            if (it != m_environs.end()) return it->second.c_str();
+            if (auto it = m_environs.find(key); it != m_environs.end()) return it->second.c_str();
             return nullptr;
         }
 
         void set_env(const char* key, const char* value, int over = 0) {
-            if (over == 1 || m_environs.find(key) == m_environs.end()) {
+            if (over == 1 || !m_environs.contains(key)) {
                 m_environs[key] = value;
             }
         }
@@ -90,7 +88,7 @@ namespace lworker {
         }
 
         bool call(uint8_t* data, size_t data_len) {
-            std::unique_lock<spin_mutex> lock(m_mutex);
+            std::lock_guard<spin_mutex> lock(m_mutex);
             uint8_t* target = m_write_buf->peek_space(data_len + sizeof(uint32_t));
             if (target) {
                 m_write_buf->write<uint32_t>(data_len);
@@ -105,7 +103,7 @@ namespace lworker {
                 if (m_write_buf->empty()) {
                     return;
                 }
-                std::unique_lock<spin_mutex> lock(m_mutex);
+                std::lock_guard<spin_mutex> lock(m_mutex);
                 m_read_buf.swap(m_write_buf);
             }
             size_t plen = 0;
@@ -127,7 +125,7 @@ namespace lworker {
         void startup(environ_map& old_envs, environ_map& new_envs, vstring conf){
             if (!conf.empty()) {
                 for (auto& [key, value] : new_envs) {
-                    auto ekey = fmt::format("QUANTA_{}", key);
+                    auto ekey = std::format("QUANTA_{}", key);
                     std::transform(ekey.begin(), ekey.end(), ekey.begin(), [](auto c) { return std::toupper(c); });
                     set_env(ekey.c_str(), value.c_str(), 1);
                 }
@@ -135,13 +133,13 @@ namespace lworker {
                 m_lua.set_function("set_env", [&](const char* key, const char* value) { set_env(key, value, 1); });
                 m_lua.set_function("add_path", [&](const char* field, const char* path) { add_path(field, path); });
                 m_lua.set_function("set_path", [&](const char* field, const char* path) { m_lua.set_path(field, path); });
-                m_lua.run_script(fmt::format("dofile('{}')", conf), [&](std::string_view err) {
+                m_lua.run_script(std::format("dofile('{}')", conf), [&](std::string_view err) {
                     printf("worker load conf %s failed, because: %s", conf.data(), err.data());
                 });
             } else {
                 m_environs = old_envs;
                 for (auto& [key, value] : new_envs) {
-                    auto ekey = fmt::format("QUANTA_{}", key);
+                    auto ekey = std::format("QUANTA_{}", key);
                     std::transform(ekey.begin(), ekey.end(), ekey.begin(), [](auto c) { return std::toupper(c); });
                     set_env(ekey.c_str(), value.c_str(), 1);
                 }
@@ -149,16 +147,17 @@ namespace lworker {
                     m_lua.set_path(it->first.c_str(), it->second.c_str());
                 }
             }
-            std::thread(&worker::run, this).swap(m_thread);
+            m_thread = std::jthread(std::bind(&worker::run, this, std::placeholders::_1));
         }
 
-        void run(){
+        void run(std::stop_token stoken){
+            LOG_INIT(m_lua.L());
             m_codec.set_buff(luakit::get_buff());
             auto quanta = m_lua.new_table(m_namespace.c_str());
             auto tid = std::this_thread::get_id();
             quanta.set("thread", m_name);
             quanta.set("pid", ::getpid());
-            quanta.set("tid", *(uint32_t*)&tid);
+            quanta.set("tid", m_thread.native_handle());
             quanta.set("platform", m_platform);
             quanta.set_function("stop", [&]() { m_running = false; });
             quanta.set_function("update", [&](uint64_t clock_ms) { update(clock_ms); });
@@ -178,14 +177,14 @@ namespace lworker {
             };
             auto sandbox = get_env("QUANTA_SANDBOX");
             if (sandbox) {
-                if (!m_lua.run_script(fmt::format("require '{}'", sandbox), ehandler)) return;
+                if (!m_lua.run_script(std::format("require '{}'", sandbox), ehandler)) return;
             }
             auto entry = get_env("QUANTA_ENTRY");
-            if (!m_lua.run_script(fmt::format("require '{}'", entry), ehandler)) return;
+            if (!m_lua.run_script(std::format("require '{}'", entry), ehandler)) return;
 
             const char* ns = m_namespace.c_str();
             while (m_running) {
-                if (m_stop) {
+                if (stoken.stop_requested()) {
                     m_lua.table_call(ns, "stop");
                     m_running = false;
                 }
@@ -194,10 +193,8 @@ namespace lworker {
         }
 
         void stop(){
-            m_stop = true;
-            if (m_thread.joinable()) {
-                m_thread.join();
-            }
+            m_thread.request_stop();
+            m_thread.join();
         }
 
         bool running() {
@@ -205,17 +202,16 @@ namespace lworker {
         }
 
     private:
+        kit_state m_lua;
         spin_mutex m_mutex;
-        std::thread m_thread;
-        bool m_stop = false;
-        bool m_running = true;
         worker_codec m_codec;
-        luakit::kit_state m_lua;
         environ_map m_environs = {};
         ischeduler* m_schedulor = nullptr;
-        std::string m_name, m_namespace, m_platform;
+        sstring m_name, m_namespace, m_platform;
         std::shared_ptr<luabuf> m_read_buf = std::make_shared<luabuf>();
         std::shared_ptr<luabuf> m_write_buf = std::make_shared<luabuf>();
+        std::jthread m_thread;
+        bool m_running = true;
     };
 }
 

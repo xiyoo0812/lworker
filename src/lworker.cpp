@@ -8,7 +8,7 @@ namespace lworker {
 
     static scheduler schedulor;
     luakit::lua_table open_lworker(lua_State* L) {
-        luakit::kit_state kit_state(L);
+        luakit::kit_state kit_state(L, true);
         auto llworker = kit_state.new_table("worker");
         llworker.set_function("shutdown", []() { schedulor.shutdown(); });
         llworker.set_function("update", [&](uint64_t clock_ms) { schedulor.update(clock_ms); });
@@ -18,8 +18,7 @@ namespace lworker {
             return 0;
         });
         llworker.set_function("startup", [](lua_State* L, vstring name, vstring conf) {
-            environ_map args;
-            lua_to_native(L, 3, args);
+            environ_map args = lua_to_native<environ_map>(L, 3);
             return schedulor.startup(name, args, conf);
         });
         llworker.set_function("stop", [](vstring name) {
