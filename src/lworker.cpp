@@ -2,8 +2,6 @@
 
 #include "scheduler.h"
 
-using vstring   = std::string_view;
-
 namespace lworker {
 
     static scheduler schedulor;
